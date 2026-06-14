@@ -6,24 +6,27 @@ import sqlite3
 import disnake
 from disnake.ext import commands, tasks
 
-# НАСТРОЙКИ БОТА И РОЛЕЙ 
+# ==========================================
+# НАСТРОЙКИ БОТА И РОЛЕЙ (ВСТАВЬ СВОИ ID ЧИСЛАМИ)
+# ==========================================
 LEVEL_REWARDS = {
-    10: ("ID")),  # ID роли "Игрок"
-    20: ("ID")),  # ID роли "Стандарт"
-    35: ("ID")),  # ID роли "Мастер"
-    50: ("ID")),  # ID роли "Ветеран"
-    75: ("ID")),  # ID роли "Элита"
-    100: ("ID"))  # ID роли "Легенда"
+    10: 111111111111111111,  # Замени на ID роли "Игрок" (без кавычек!)
+    20: 222222222222222222,  # Замени на ID роли "Стандарт"
+    35: 333333333333333333,  # Замени на ID роли "Мастер"
+    50: 444444444444444444,  # Замени на ID роли "Ветеран"
+    75: 555555555555555555,  # Замени на ID роли "Элита"
+    100: 666666666666666666  # Замени на ID роли "Легенда"
 }
 
-# [ФИЧА 3] Черный список каналов (опыт в них не капает)
-IGNORE_CHANNELS = ["ID"]  # Замени нули на ID АФК-войсов
+# Черный список каналов (опыт в них не капает)
+IGNORE_CHANNELS = [000000000000000000]  # Замени на ID АФК-войсов через запятую
 
-# [ФИЧА 4] Множитель опыта х2 для бустеров или VIP
-BOOSTER_ROLE_ID = "ID"  # Замени ноль на ID роли бустера/VIP
+# Множитель опыта х2 для бустеров или VIP
+BOOSTER_ROLE_ID = 000000000000000000  # Замени на ID роли бустера/VIP
 
 # ID канала, куда слать красивые поздравления о повышении ранга
-NOTIFICATION_CHANNEL_ID = "ID"  # Замени ноль на ID текстового канала левелапов
+NOTIFICATION_CHANNEL_ID = 000000000000000000  # Замени на ID текстового канала левелапов
+# ==========================================
 
 intents = disnake.Intents.default()
 intents.members = True
@@ -38,7 +41,6 @@ last_message_times = {}  # Словарь для защиты от спама: {
 
 
 # --- РАБОТА С БАЗОЙ ДАННЫХ ---
-
 
 def init_db():
     conn = sqlite3.connect("server_stats.db")
@@ -101,11 +103,9 @@ def add_voice_time(user_id, seconds):
 
 # --- ВЫДАЧА РОЛЕЙ И ОПОВЕЩЕНИЯ ---
 async def process_level_roles(member, new_lvl, guild):
-    # Если админ — полностью игнорируем выдачу ролей и спам
     if member.guild_permissions.administrator:
         return
 
-    # Ищем специальный канал для поздравлений
     channel = guild.get_channel(NOTIFICATION_CHANNEL_ID)
     if not channel:
         print(f"[Ошибка] Не найден канал для оповещений с ID {NOTIFICATION_CHANNEL_ID}")
@@ -114,7 +114,6 @@ async def process_level_roles(member, new_lvl, guild):
     new_role_id = LEVEL_REWARDS.get(new_lvl)
     new_role = guild.get_role(new_role_id) if new_role_id else None
 
-    # Создаем красивое Embed-сообщение
     embed = disnake.Embed(
         title="🎉 ПОВЫШЕНИЕ РАНГА! 🎉",
         description=f"{member.mention} прокачался и достиг **{new_lvl} уровня**!",
@@ -165,17 +164,14 @@ async def process_level_roles(member, new_lvl, guild):
 async def on_ready():
     init_db()
 
-    # Сканируем войсы при холодном старте бота
     for guild in bot.guilds:
         for channel in guild.voice_channels:
-            # [ФИЧА 3] Пропускаем АФК-комнаты из игнор-листа
             if channel.id in IGNORE_CHANNELS:
                 continue
             for member in channel.members:
                 if not member.bot and member.id not in voice_connected_users:
                     voice_connected_users[member.id] = datetime.datetime.now(datetime.timezone.utc)
 
-    # Запускаем фоновую таску сохранения данных
     if not auto_save_voice_stats.is_running():
         auto_save_voice_stats.start()
 
@@ -197,11 +193,10 @@ async def on_message(message):
 
     last_message_times[message.author.id] = now
 
-    # [ФИЧА 4] Начисление опыта за сообщения (базовое vs X2 для бустеров)
     if any(role.id == BOOSTER_ROLE_ID for role in message.author.roles):
-        xp_to_add = random.randint(30, 50)  # X2 опыт
+        xp_to_add = random.randint(30, 50)
     else:
-        xp_to_add = random.randint(15, 25)  # Обычный опыт
+        xp_to_add = random.randint(15, 25)
 
     leveled_up, new_lvl = update_user_xp(message.author.id, xp_to_add)
 
@@ -216,18 +211,15 @@ async def on_voice_state_update(member, before, after):
 
     now = datetime.datetime.now(datetime.timezone.utc)
 
-    # 1. Если пользователь вышел из канала или перешел в другой
     if before.channel is not None and before.channel != after.channel:
         join_time = voice_connected_users.pop(member.id, None)
         if join_time:
             duration = int((now - join_time).total_seconds())
             add_voice_time(member.id, duration)
 
-            # Начисляем опыт (только если канал не был в черном списке)
             if before.channel.id not in IGNORE_CHANNELS:
                 xp_for_voice = duration // 30
                 if xp_for_voice > 0:
-                    # Проверка на х2 множитель
                     if any(role.id == BOOSTER_ROLE_ID for role in member.roles):
                         xp_for_voice *= 2
 
@@ -235,31 +227,24 @@ async def on_voice_state_update(member, before, after):
                     if leveled_up:
                         await process_level_roles(member, new_lvl, member.guild)
 
-    # 2. Если пользователь зашел в канал (и этот канал НЕ в игноре)
     if after.channel is not None and before.channel != after.channel:
         if after.channel.id not in IGNORE_CHANNELS:
             voice_connected_users[member.id] = now
 
 
-# --- СЛЭШ-КОМАНДЫ ---
-
-# --- [ФИЧА 1] ФОНОВОЕ АВТОСОХРАНЕНИЕ КАЖДЫЕ 5 МИНУТ ---
+# --- ФОНОВОЕ АВТОСОХРАНЕНИЕ КАЖДЫЕ 5 МИНУТ ---
 @tasks.loop(minutes=5)
 async def auto_save_voice_stats():
     now = datetime.datetime.now(datetime.timezone.utc)
-    # Проходимся по всем, кто сейчас залогирован в войсе
     for user_id, join_time in list(voice_connected_users.items()):
         duration = int((now - join_time).total_seconds())
         if duration <= 0:
             continue
 
-        # Сохраняем накопленное за 5 минут время в БД
         add_voice_time(user_id, duration)
 
-        # Считаем опыт за эти 5 минут (1 XP за 30 сек в войсе)
         xp_for_voice = duration // 30
         if xp_for_voice > 0:
-            # Проверяем, есть ли х2 буст
             member = None
             for guild in bot.guilds:
                 member = guild.get_member(user_id)
@@ -273,10 +258,11 @@ async def auto_save_voice_stats():
             if leveled_up and member:
                 await process_level_roles(member, new_lvl, member.guild)
 
-        # Сдвигаем точку отсчета на "прямо сейчас", чтобы время не засейвилось повторно
         voice_connected_users[user_id] = now
 
-# [ФИЧА 2] КРАСИВАЯ КОМАНДА /profile С ПРОГРЕСС-БАРОМ
+
+# --- СЛЭШ-КОМАНДЫ ---
+
 @bot.slash_command(name="profile", description="Посмотреть профиль и прогресс уровня")
 async def profile(inter: disnake.ApplicationCommandInteraction, member: disnake.Member = None):
     target = member or inter.author
@@ -288,14 +274,12 @@ async def profile(inter: disnake.ApplicationCommandInteraction, member: disnake.
     await inter.response.defer()
 
     db_data = get_user_data(target.id)
-
     now = datetime.datetime.now(datetime.timezone.utc)
     time_on_server = now - target.joined_at
     days_on_server = time_on_server.days
 
     total_seconds = db_data["voice_time"]
 
-    # Прибавляем текущую активную сессию, если сидит в войсе прямо сейчас
     if target.id in voice_connected_users:
         current_session = int((now - voice_connected_users[target.id]).total_seconds())
         total_seconds += current_session
@@ -306,9 +290,8 @@ async def profile(inter: disnake.ApplicationCommandInteraction, member: disnake.
     current_xp = db_data['xp']
     xp_needed = int(100 * math.pow(db_data["level"], 1.5))
 
-    # Расчет текстового прогресс-бара
     percentage = min(100, int((current_xp / xp_needed) * 100))
-    bar_length = 12  # Длина полоски в символах
+    bar_length = 12
     filled_blocks = int((percentage / 100) * bar_length)
     empty_blocks = bar_length - filled_blocks
     progress_bar = f"«{'█' * filled_blocks}{'░' * empty_blocks}» `{percentage}%`"
@@ -321,20 +304,15 @@ async def profile(inter: disnake.ApplicationCommandInteraction, member: disnake.
     if target.display_avatar:
         embed.set_thumbnail(url=target.display_avatar.url)
 
-    # Проверяем, есть ли у пользователя статус Бустера/VIP для плашки в профиле
     is_premium = "⭐ Премиум-буст (X2 XP)" if any(
         role.id == BOOSTER_ROLE_ID for role in target.roles) else "Обычный статус"
 
-    embed.add_field(name="🌟 Ранг и Статус", value=f"**Уровень:** {db_data['level']}\n**Модификатор:** {is_premium}",
-                    inline=False)
-    embed.add_field(name="📈 Опыт до следующего уровня", value=f"{current_xp} / {xp_needed} XP\n{progress_bar}",
-                    inline=False)
+    embed.add_field(name="🌟 Ранг и Статус", value=f"**Уровень:** {db_data['level']}\n**Модификатор:** {is_premium}", inline=False)
+    embed.add_field(name="📈 Опыт до следующего уровня", value=f"{current_xp} / {xp_needed} XP\n{progress_bar}", inline=False)
     embed.add_field(name="🎙 В голосовых каналах", value=f"⏱ {hours} ч. {minutes} мин.", inline=True)
-    embed.add_field(name="📅 На сервере",
-                    value=f"🗓 {days_on_server} дней\n*(С {target.joined_at.strftime('%d.%m.%Y')})*", inline=True)
+    embed.add_field(name="📅 На сервере", value=f"🗓 {days_on_server} дней\n*(С {target.joined_at.strftime('%d.%m.%Y')})*", inline=True)
 
     embed.set_footer(text=f"Запросил: {inter.author.display_name}", icon_url=inter.author.display_avatar.url)
-
     await inter.edit_original_message(embed=embed)
 
 
@@ -373,27 +351,22 @@ async def leaderboard(inter: disnake.ApplicationCommandInteraction):
     await inter.edit_original_message(embed=embed)
 
 
-# --- [ФИЧА 3] КОМАНДА /donate ДЛЯ СБОРА НА ХОСТИНГ ---
-# Теперь отступы правильные, и команда находится ВНЕ других функций
 @bot.slash_command(name="donate", description="Поддержать работу бота и сервера")
 async def donate(inter: disnake.ApplicationCommandInteraction):
-    # Создаем красивое сообщение
     embed = disnake.Embed(
         title="💳 Поддержка сервера",
         description="Мы собираем средства на оплату хостинга (99₽/мес), чтобы `kokushibo` работал 24/7 и радовал нас статистикой. Любая копейка приближает нас к цели!",
-        color=0xffd700,  # Золотой цвет
+        color=0xffd700,
         timestamp=datetime.datetime.now()
     )
 
-    # Добавляем поле с картой
     embed.add_field(
         name="Куда отправлять:",
-        value=f"Номер карты: `{"ваша карта"}`\n\n*При переводе, если есть возможность, напиши в комментарии свой ник и пожелания, если имеются, чтобы я знал, кто помог!*",
+        value="Номер карты: `ТВОЙ_НОМЕР_КАРТЫ`\n\n*При переводе, если есть возможность, напиши в комментарии свой ник и пожелания, чтобы я знал, кто помог!*",
         inline=False
     )
 
     embed.set_footer(text="Спасибо за поддержку развития проекта!")
-
     await inter.response.send_message(embed=embed)
 
 
