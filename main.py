@@ -14,7 +14,6 @@ voice_session_participants = {}
 # ==========================================
 # НАСТРОЙКИ БОТА И РОЛЕЙ (ВСТАВЬ СВОИ ID ЧИСЛАМИ)
 # ==========================================
-# --- НАСТРОЙКИ БОТА И РОЛЕЙ ---
 LEVEL_REWARDS = {
     10: 1346774820649566218,  # ID роли "Игрок"
     20: 1413992000792825907,  # ID роли "Стандарт"
@@ -46,15 +45,15 @@ bot = commands.InteractionBot(intents=intents, test_guilds=[1346734620418375741]
 
 # --- КЭШ БОТА ---
 voice_connected_users = {}
-last_message_times = {}  # Защита от спама: {user_id: timestamp}
+last_message_times = {}  # ИСПРАВЛЕНО: Добавлен недостающий словарь для текстового спам-фильтра
+
+# Лимит для записи лога активности — ровно 1 час (3600 секунд)
+SESSION_LIMIT = 3600
 
 
-# --- РАБОТА С БАЗОЙ ДАННЫХ ---
-
-# --- РАБОТА С БАЗОЙ ДАННЫХ ---
+# --- ФУНКЦИИ БАЗЫ ДАННЫХ ---
 
 def init_db():
-    # ИСПРАВЛЕНО: перенесли файл в общее постоянное хранилище хостинга
     conn = sqlite3.connect("/app/shared/server_stats.db")
     cursor = conn.cursor()
     cursor.execute("""
@@ -70,7 +69,6 @@ def init_db():
 
 
 def get_user_data(user_id):
-    # ИСПРАВЛЕНО: путь к постоянной БД
     conn = sqlite3.connect("/app/shared/server_stats.db")
     cursor = conn.cursor()
     cursor.execute("SELECT xp, level, voice_time FROM users WHERE user_id = ?", (user_id,))
@@ -84,7 +82,6 @@ def get_user_data(user_id):
 
 
 def update_user_xp(user_id, xp_to_add):
-    # ИСПРАВЛЕНО: путь к постоянной БД
     conn = sqlite3.connect("/app/shared/server_stats.db")
     cursor = conn.cursor()
     data = get_user_data(user_id)
@@ -107,7 +104,6 @@ def update_user_xp(user_id, xp_to_add):
 
 
 def add_voice_time(user_id, seconds):
-    # ИСПРАВЛЕНО: путь к постоянной БД
     conn = sqlite3.connect("/app/shared/server_stats.db")
     cursor = conn.cursor()
     get_user_data(user_id)
@@ -174,12 +170,125 @@ async def process_level_roles(member, new_lvl, guild):
     await channel.send(embed=embed)
 
 
-# --- СОБЫТИЯ ---
+# --- ЕДИНЫЙ ОБЪЕДИНЕННЫЙ ОБРАБОТЧИК ГОЛОСОВЫХ КАНАЛОВ ---
+@bot.event
+async def on_voice_state_update(member, before, after):
+    if member.bot:
+        return
+
+    user_id = member.id
+    current_time = time.time()
+
+    # ==========================================
+    # ЧАСТЬ 1: ЛОГИКА НАЧИСЛЕНИЯ ОПЫТА И ВРЕМЕНИ
+    # ==========================================
+
+    # 1. Пользователь зашел в голосовой канал
+    if before.channel is None and after.channel is not None:
+        if after.channel.id not in IGNORE_CHANNELS:
+            voice_connected_users[user_id] = current_time
+
+    # 2. Пользователь полностью вышел из голосового канала
+    elif before.channel is not None and after.channel is None:
+        if user_id in voice_connected_users:
+            join_time = voice_connected_users.pop(user_id)
+            duration = int(current_time - join_time)
+
+            add_voice_time(user_id, duration)
+
+            xp_gained = (duration // 60) * 10
+            if xp_gained > 0:
+                if any(role.id == BOOSTER_ROLE_ID for role in member.roles):
+                    xp_gained *= 2
+                leveled_up, new_lvl = update_user_xp(user_id, xp_gained)
+                if leveled_up:
+                    await process_level_roles(member, new_lvl, member.guild)
+
+    # 3. Пользователь перешел из одного канала в другой
+    elif before.channel is not None and after.channel is not None and before.channel.id != after.channel.id:
+        if user_id in voice_connected_users:
+            join_time = voice_connected_users.pop(user_id)
+            duration = int(current_time - join_time)
+            add_voice_time(user_id, duration)
+
+            xp_gained = (duration // 60) * 10
+            if xp_gained > 0:
+                if any(role.id == BOOSTER_ROLE_ID for role in member.roles):
+                    xp_gained *= 2
+                leveled_up, new_lvl = update_user_xp(user_id, xp_gained)
+                if leveled_up:
+                    await process_level_roles(member, new_lvl, member.guild)
+
+        if after.channel.id not in IGNORE_CHANNELS:
+            voice_connected_users[user_id] = current_time
+
+    # ==========================================
+    # ЧАСТЬ 2: ОТСЛЕЖИВАНИЕ СЕССИЙ ДЛЯ СЕРВЕРА (С ЛИМИТОМ В 1 ЧАС)
+    # ==========================================
+
+    # Ситуация А: Кто-то зашел в канал
+    if after.channel is not None and (before.channel != after.channel) and after.channel.id not in IGNORE_CHANNELS:
+        channel_id = after.channel.id
+
+        if channel_id not in voice_session_starts:
+            voice_session_starts[channel_id] = current_time
+            voice_session_participants[channel_id] = set()
+
+        voice_session_participants[channel_id].add(user_id)
+
+    # Ситуация Б: Кто-то вышел из канала
+    if before.channel is not None and (before.channel != after.channel):
+        channel_id = before.channel.id
+        active_members = [m for m in before.channel.members if not m.bot]
+
+        # Если в канале больше никого не осталось
+        if len(active_members) == 0 and channel_id in voice_session_starts:
+            start_time = voice_session_starts.pop(channel_id)
+            participants_ids = voice_session_participants.pop(channel_id, set())
+
+            session_duration = int(current_time - start_time)
+
+            # ИСПРАВЛЕНО: Если общая сессия в канале длилась меньше 1 часа (3600 сек), лог в текстовый канал не отправляется
+            if session_duration < SESSION_LIMIT:
+                print(
+                    f"[LOGGER] Сессия в канале {before.channel.name} отменена: длилась меньше часа ({session_duration // 60} мин.).")
+                return
+
+            hours = session_duration // 3600
+            minutes = (session_duration % 3600) // 60
+            seconds = session_duration % 60
+
+            duration_str = ""
+            if hours > 0: duration_str += f"{hours} ч. "
+            if minutes > 0: duration_str += f"{minutes} мин. "
+            duration_str += f"{seconds} сек."
+
+            if participants_ids:
+                participants_mentions = ", ".join([f"<@{u_id}>" for u_id in participants_ids])
+            else:
+                participants_mentions = "Никого не было (заходили только боты)"
+
+            log_channel = bot.get_channel(LOG_CHANNEL_ID)
+            if log_channel:
+                embed = disnake.Embed(
+                    title="🎙️ Голосовая сессия завершена",
+                    description=f"В канале **{before.channel.name}** разошлись последние участники.",
+                    color=disnake.Color.purple(),
+                    timestamp=datetime.datetime.now()
+                )
+                embed.add_field(name="⏳ Длительность сессии", value=f"`{duration_str}`", inline=False)
+                embed.add_field(name="👥 Кто присутствовал за всё время:", value=participants_mentions, inline=False)
+                embed.set_footer(text="Kokushibo Logger")
+
+                await log_channel.send(embed=embed)
+
+
+# --- ТЕКСТОВЫЕ СОБЫТИЯ И ТАСКИ ---
+
 @bot.event
 async def on_ready():
     init_db()
 
-    # Считаем время захода через time.time() для совместимости
     for guild in bot.guilds:
         for channel in guild.voice_channels:
             if channel.id in IGNORE_CHANNELS:
@@ -218,93 +327,6 @@ async def on_message(message):
         await process_level_roles(message.author, new_lvl, message.guild)
 
 
-@bot.event
-async def on_voice_state_update(member, before, after):
-    # ==========================================
-    # ЧАСТЬ 1: ЛОГИКА НАЧИСЛЕНИЯ ОПЫТА И ВРЕМЕНИ
-    # ==========================================
-
-    # 1. Пользователь зашел в голосовой канал
-    if before.channel is None and after.channel is not None:
-        if not member.bot and after.channel.id not in IGNORE_CHANNELS:
-            voice_connected_users[member.id] = time.time()
-
-    # 2. Пользователь полностью вышел из голосового канала
-    elif before.channel is not None and after.channel is None:
-        if member.id in voice_connected_users:
-            join_time = voice_connected_users.pop(member.id)
-            duration = int(time.time() - join_time)
-
-            # Сохраняем время в базу
-            add_voice_time(member.id, duration)
-
-            # Считаем и добавляем опыт (10 XP за каждую минуту)
-            xp_gained = (duration // 60) * 10
-            if xp_gained > 0:
-                if any(role.id == BOOSTER_ROLE_ID for role in member.roles):
-                    xp_gained *= 2
-                leveled_up, new_lvl = update_user_xp(member.id, xp_gained)
-                if leveled_up:
-                    await process_level_roles(member, new_lvl, member.guild)
-
-    # ==========================================
-    # ЧАСТЬ 2: ОТСЛЕЖИВАНИЕ СЕССИЙ ДЛЯ СЕРВЕРА
-    # ==========================================
-
-    # Ситуация А: Кто-то зашел в канал
-    if after.channel is not None and (before.channel != after.channel) and after.channel.id not in IGNORE_CHANNELS:
-        channel_id = after.channel.id
-
-        if channel_id not in voice_session_starts:
-            voice_session_starts[channel_id] = time.time()
-            voice_session_participants[channel_id] = set()
-
-        if not member.bot:
-            voice_session_participants[channel_id].add(member.id)
-
-    # Ситуация Б: Кто-то вышел из канала
-    if before.channel is not None and (before.channel != after.channel):
-        channel_id = before.channel.id
-
-        active_members = [m for m in before.channel.members if not m.bot]
-
-        if len(active_members) == 0 and channel_id in voice_session_starts:
-            start_time = voice_session_starts.pop(channel_id)
-            participants_ids = voice_session_participants.pop(channel_id, set())
-
-            session_duration = int(time.time() - start_time)
-
-            hours = session_duration // 3600
-            minutes = (session_duration % 3600) // 60
-            seconds = session_duration % 60
-
-            duration_str = ""
-            if hours > 0: duration_str += f"{hours} ч. "
-            if minutes > 0: duration_str += f"{minutes} мин. "
-            duration_str += f"{seconds} сек."
-
-            if participants_ids:
-                participants_mentions = ", ".join([f"<@{u_id}>" for u_id in participants_ids])
-            else:
-                participants_mentions = "Никого не было (заходили только боты)"
-
-            log_channel = bot.get_channel(LOG_CHANNEL_ID)
-
-            if log_channel:
-                embed = disnake.Embed(
-                    title="🎙️ Голосовая сессия завершена",
-                    description=f"В канале **{before.channel.name}** разошлись последние участники.",
-                    color=disnake.Color.purple(),
-                    timestamp=datetime.datetime.now()
-                )
-                embed.add_field(name="⏳ Длительность сессии", value=f"`{duration_str}`", inline=False)
-                embed.add_field(name="👥 Кто присутствовал за всё время:", value=participants_mentions, inline=False)
-                embed.set_footer(text="Kokushibo Logger")
-
-                await log_channel.send(embed=embed)
-
-
-# --- ФОНОВОЕ АВТОСОХРАНЕНИЕ КАЖДЫЕ 5 МИНУТ ---
 @tasks.loop(minutes=5)
 async def auto_save_voice_stats():
     now = time.time()
@@ -375,12 +397,12 @@ async def profile(inter: disnake.ApplicationCommandInteraction, member: disnake.
         timestamp=datetime.datetime.now()
     )
     if target.display_avatar:
-        embed.set_thumbnail(url=member.display_avatar.url if member else inter.author.display_avatar.url)
+        embed.set_thumbnail(url=target.display_avatar.url)
 
     is_premium = "⭐ Премиум-буст (X2 XP)" if any(
         role.id == BOOSTER_ROLE_ID for role in target.roles) else "Обычный статус"
 
-    embed.add_field(name="🌟 Ранг и Статус", value=f"**У уровень:** {db_data['level']}\n**Модификатор:** {is_premium}",
+    embed.add_field(name="🌟 Ранг и Статус", value=f"**Уровень:** {db_data['level']}\n**Модификатор:** {is_premium}",
                     inline=False)
     embed.add_field(name="📈 Опыт до следующего уровня", value=f"{current_xp} / {xp_needed} XP\n{progress_bar}",
                     inline=False)
@@ -396,7 +418,8 @@ async def profile(inter: disnake.ApplicationCommandInteraction, member: disnake.
 async def leaderboard(inter: disnake.ApplicationCommandInteraction):
     await inter.response.defer()
 
-    conn = sqlite3.connect("server_stats.db")
+    # ИСПРАВЛЕНО: указан верный путь к общей базе данных хостинга
+    conn = sqlite3.connect("/app/shared/server_stats.db")
     cursor = conn.cursor()
 
     cursor.execute("SELECT user_id, level, xp FROM users ORDER BY level DESC, xp DESC LIMIT 10")
